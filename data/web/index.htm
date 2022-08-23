@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<!--
+  EP-OBD2-ESP32-U8G2
+  
+  A standalone tool to automatically turn the DRLs off when parked.
+  Can retrieves some interesting information such as battery SoC/SoH 
+  and display it on an optional LCD or on a web browser via WiFi. (Both
+  station mode and softAP mode are supported.)
+  
+
+  Copyright 2022, Kasom
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+-->
+<html>
+<head>
+    <title>EP-OBD2-ESP32-U8G2</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="jquery-ui.min.css">
+    <script src="jquery.min.js"></script>
+    <script src="jquery-ui.min.js"></script>
+    <script>
+        var webSocketCANMonitor=null
+        var webSocketHome=null
+        var canMessageBuffer=""
+
+        $( function() {
+            $( "#tabs" ).tabs();
+            $( "#tabs" ).on( "tabsactivate", function( event, ui ) {
+                let oldTab=ui.oldPanel.attr('id');
+                let newTab=ui.newPanel.attr('id');
+
+                switch (oldTab) {
+                    case 'tabs-home': tabsHomeStop(); break;
+                    case 'tabs-can-monitor': tabsCANMonitorStop(); break;
+                    default:
+                }
+                switch (newTab) {
+                    case 'tabs-home': tabsHomeStart(); break;
+                    case 'tabs-can-monitor': tabsCANMonitorStart(); break;
+                    case 'tabs-wifi': tabsWiFiStart(); break;
+                    case 'tabs-lcd': tabsLCDStart(); break;
+                    default:
+                }
+
+                console.log(oldTab + " -> " + newTab);
+            } );
+
+            // enable lcd tab if the firmware support it
+            $.get("/lcd",function (data,status) { if (status=="success") $('#lcd-head').show(); });
+
+            $( "#lcd_brightness" ).slider({
+                value: 128,
+                min:0,
+                max:255,
+                orientation: "horizontal",
+                animate: true,
+            });
+
+            var start_brightness = $("#lcd_brightness").slider("value");
+            var end_brightness='';
+
+            $("#lcd_brightness").on("slidestop", function(event, ui) {
+                end_brightness = ui.value;
+
+                if (start_brightness != end_brightness) {
+                    // do stuff
+                }
+
+                start_brightness = end_brightness;
+            });
+
+            $( "#lcd_contrast" ).slider({
+                value: 65,
+                min:0,
+                max:255,
+                orientation: "horizontal",
+                animate: true,
+            });
+
+            var start_contrast = $("#lcd_contrast").slider("value");
+            var end_contrast='';
+
+            $("#lcd_contrast").on("slidestop", function(event, ui) {
+                end_contrast = ui.value;
+
+                if (start_contrast != end_contrast) {
+                    // do stuff
+                }
+
+                start_contrast = end_contrast;
+            });
+        } );
+
+        function canMessagesScroll() {
+            if ($('#can_messages_auto_scroll').is(":checked")) {
+                $('#can_messages_scroll').scrollTop($('#can_messages_scroll')[0].scrollHeight - $('#can_messages_scroll')[0].clientHeight);
+            }
+        }
+
+        function update_bms_power() {
+            try {
+                let v=parseFloat($('#bms_voltage').text());
+                let a=parseFloat($('#bms_current').text());
+                $('#bms_power').text(((v*a)/1000.0).toFixed(3));
+            } catch (e) {
+                $('#bms_power').text('-');
+            }
+        }
+
+        function update_dc_dc_power() {
+            try {
+                let v=parseFloat($('#vcu_dc_dc_voltage').text());
+                let a=parseFloat($('#vcu_dc_dc_current').text());
+                $('#vcu_dc_dc_power').text((v*a).toFixed(1));
+            } catch (e) {
+                $('#vcu_dc_dc_power').text('-');
+            }
+        }
+
+        function decodeCANMessage(message) {
+            let m=message.trim().split(/\s+/)
+            
+            if (m.length==11) {
+                switch (m[0]) {
+                    case '7ed': // BMS
+                        switch (m[3]+m[4]+m[5]+m[6]) {
+                            case '0562b061': 
+                                $('#bms_soh').text(((parseInt(m[7],16)<<8|parseInt(m[8],16))*0.01).toFixed(2));
+                                break;
+                            case '0562b046':
+                                $('#bms_soc').text(((parseInt(m[7],16)<<8|parseInt(m[8],16))*0.1).toFixed(1));
+                                break;
+                            case '0462b048':
+                                switch (parseInt(m[7],16)) {
+                                    case 0: $('#bms_status').text("Connected unlockd"); break;
+                                    case 1: $('#bms_status').text("Idle"); break;
+                                    case 3: $('#bms_status').text("Running"); break;
+                                    case 6: $('#bms_status').text("Charging"); break;
+                                    case 7: $('#bms_status').text("Rapid charging"); break;
+                                    case 8: $('#bms_status').text("Sleep"); break;
+                                    case 10: $('#bms_status').text("Connected"); break;
+                                    case 12: $('#bms_status').text("Charge starting"); break;
+                                    default: $('#bms_status').text("Unknown"); 
+                                }
+                                break;
+                            case '0462b05c':
+                                $('#bms_temperature').text((0.1*(parseInt(m[7],16)*5-400)).toFixed(1));
+                                break;
+                            case '0562b042': 
+                                $('#bms_voltage').text(((parseInt(m[7],16)<<8|parseInt(m[8],16))*0.25).toFixed(2));
+                                update_bms_power();
+                                break;
+                            case '0562b043': 
+                                $('#bms_current').text((((parseInt(m[7],16)<<8|parseInt(m[8],16))-40000)*0.025).toFixed(3));
+                                update_bms_power();
+                                break;
+                        }
+                        break;
+
+                    case '7eb': // VCU
+                        switch (m[3]+m[4]+m[5]+m[6]) {
+                            case '0462b900':
+                                switch (parseInt(m[7],16)) {
+                                    case 7: $('#vcu_gear').text('R'); break;
+                                    case 6: $('#vcu_gear').text('N'); break;
+                                    case 5: $('#vcu_gear').text('D'); break;
+                                    case 8: $('#vcu_gear').text('P'); break;
+                                    default: $('#vcu_gear').text('Unknown');
+                                }
+                                break;
+                            case '0562b583':
+                                $('#vcu_dc_dc_current').text(((parseInt(m[7],16)<<8|parseInt(m[8],16))*0.1).toFixed(1)); 
+                                update_dc_dc_power();
+                                break;
+                            case '0562b584':
+                                $('#vcu_dc_dc_voltage').text(((parseInt(m[7],16)<<8|parseInt(m[8],16))*0.1).toFixed(1));
+                                update_dc_dc_power();
+                                break;
+                            case '0462b587':
+                                $('#vcu_dc_dc_temperature').text(parseInt(m[7],16)-40); break;
+                            case '0462b309':
+                                $('#vcu_motor_coolant').text(parseInt(m[7],16)-40); break;
+                            case '0462b405':
+                                $('#vcu_motor_temperature').text(parseInt(m[7],16)-40); break;
+                            case '0662e101':
+                                $('#vcu_odometer').text(parseInt(m[7],16)<<16|parseInt(m[8],16)<<8|parseInt(m[9],16)); break;
+
+                        }
+                        break;
+                }
+            }
+        }
+
+        function tabsHomeStart() {
+            webSocketHome=new WebSocket("ws://"+window.location.host+"/ws");
+            webSocketHome.onopen=function(e) {
+                $.post( "/polling", {mode:"on"},'text' ).done( function ( response ) {
+                    console.log(response);
+                });
+            };
+            webSocketHome.onmessage=function(event) {
+                decodeCANMessage(event.data);
+            };
+            webSocketHome.onclose = function(event) {
+                console.log(event);
+            };
+            webSocketHome.onerror = function(error) {
+                console.log(error.message);
+            };
+        }
+
+        function tabsHomeStop() {
+            webSocketHome.close();
+        }
+
+        function tabsCANMonitorStart() {
+            $.get("/can2udp",update_can2udp);
+
+            webSocketCANMonitor=new WebSocket("ws://"+window.location.host+"/ws");
+            webSocketCANMonitor.onopen=function(e) {
+                canMessageBuffer=(new Date().toISOString()).toString()+"\tConnection established...\n";
+                canMessagesScroll();
+            };
+            webSocketCANMonitor.onmessage=function(event) {
+                canMessageBuffer+=(new Date().toISOString()).toString()+"\t"+event.data+"\n";
+                $('#can_messages').text(canMessageBuffer);
+                canMessagesScroll();
+            };
+            webSocketCANMonitor.onclose = function(event) {
+                if (event.wasClean) {
+                    canMessageBuffer+=(new Date().toISOString()).toString()+`\t[close] Connection closed cleanly, code=${event.code} reason=${event.reason}\n`;
+                } else {
+                    canMessageBuffer+=(new Date().toISOString()).toString()+'\t[close] Connection died\n';
+                }
+                $('#can_messages').text(canMessageBuffer);
+                canMessagesScroll();
+            };
+            webSocketCANMonitor.onerror = function(error) {
+                canMessageBuffer+=(new Date().toISOString()).toString()+`\t[error] ${error.message}\n`;
+                $('#can_messages').text(canMessageBuffer);
+                canMessagesScroll();
+            };
+        }
+
+        function tabsCANMonitorStop() {
+            webSocketCANMonitor.close();
+            canMessageBuffer='';
+        }
+
+        function tabsWiFiStart() {
+            $.get("/wifi",update_wifi);
+        }
+
+        function update_wifi(data,status) {
+            $('#ap_mode_en').prop('checked',data.ap_mode_en);
+            $('#soft_ap_pass').val(data.soft_ap_pass);
+            $('#soft_ap_ssid').val(data.soft_ap_ssid);
+            $('#sta_mode_en').prop('checked',data.sta_mode_en);
+            $('#sta_ap_pass').val(data.sta_ap_pass);
+            $('#sta_ap_ssid').val(data.sta_ap_ssid);
+        }
+
+        function save_can2udp() {
+            let data={
+                can2udp_enable: $('#can2udp_enable').prop('checked'),
+                can2udp_ip: $('#can2udp_ip').val(),
+                can2udp_port: $('#can2udp_port').val(),
+            };
+
+            $.post( "/can2udp", data,'text' ).done( function ( response ) {
+                alert(response);
+            } );
+        }
+
+        function update_can2udp(data,status) {    
+            console.log(data);
+            console.log(data.can2udp_enable);      
+            $('#can2udp_enable').prop('checked',data.can2udp_enable);
+            $('#can2udp_ip').val(data.can2udp_ip);
+            $('#can2udp_port').val(data.can2udp_port);
+        }
+
+        function saveWiFi() {
+            let data={
+                sta_mode_en: $('#sta_mode_en').prop('checked'),
+                sta_ap_pass: $('#sta_ap_pass').val(),
+                sta_ap_ssid: $('#sta_ap_ssid').val(),
+
+                ap_mode_en: $('#ap_mode_en').prop('checked'),
+                soft_ap_pass: $('#soft_ap_pass').val(),
+                soft_ap_ssid: $('#soft_ap_ssid').val(),
+            };
+
+            if (data.sta_mode_en && data.sta_ap_pass!=0 && (data.sta_ap_pass<8 || data.sta_ap_pass>63)) {
+                alert('The password for station mode must be at least 8 characters and at most 63 characters.')
+                return;
+            }
+
+            if (data.ap_mode_en && data.soft_ap_pass!=0 && (data.soft_ap_pass<8 || data.soft_ap_pass>63)) {
+                alert('The password for access point mode must be at least 8 characters and at most 63 characters.')
+                return;
+            }
+
+            if (!data.sta_mode_en && !data.ap_mode_en) {
+                if (!confirm('This will disable WiFi. To re-enable, press "BOOT" button for at least 6 seconds to reset all configurations.')) {
+                    return;
+                }
+            }
+
+            $.post( "/wifi", data,'text' ).done( function ( response ) {
+                alert(response);
+            } );
+        }
+
+        function tabsLCDStart() {
+            $.get("/lcd",update_slider);
+        }
+
+        function update_slider(data,status) {
+            $('#lcd_brightness').slider("value",data.brightness);
+            $('#brightness_value').text(data.brightness);
+            $('#lcd_contrast').slider("value",data.contrast);
+            $('#contrast_value').text(data.contrast);
+        }
+
+        function lcdApply() {
+            let brightness = $('#lcd_brightness').slider("option", "value");
+            let contrast = $('#lcd_contrast').slider("option", "value");
+
+            $.get("/lcd?brightness="+brightness+"&contrast="+contrast,function(data,status) {});
+        }
+
+        function download(filename, text) {
+            var element = document.createElement('a');
+            element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
+            element.setAttribute('download', filename);
+
+            element.style.display = 'none';
+            document.body.appendChild(element);
+
+            element.click();
+
+            document.body.removeChild(element);
+        }
+
+        function sendCAN() {
+            let msg=$('#can_message_to_send').val();
+            webSocketCANMonitor.send(msg);
+        }
+
+        function setPolling(mode) {
+            $.post( "/polling", {mode:mode},'text' ).done( function ( response ) {
+                alert(response);
+            });
+        }
+
+        function postCAN(message) {
+            $.post( "/can-send", {message:message},'text' ).done( function ( response ) {
+                console.log(message);
+            });
+        }
+
+        tabsHomeStart();
+    </script>
+
+    <style>
+        div.scroll {
+            margin:4px, 4px;
+            padding:4px;
+            width: 100%;
+            height: 400px;
+            overflow-x: hidden;
+            overflow-y: auto;
+            text-align: justify;
+        }
+
+        table tr:nth-child(odd) td{
+            background:#ddd;
+        }
+        table tr:nth-child(even) td{
+            background:#aaa;
+        }
+    </style>
+
+</head>
+<body>
+
+    <div id="tabs">
+        <ul>
+            <li><a href="#tabs-home">Home</a></li>
+            <li><a href="#tabs-can-monitor">CAN bus</a></li>
+            <li><a href="#tabs-wifi">WiFi</a></li>
+            <li id="lcd-head" style="display:none;"><a href="#tabs-lcd">LCD</a></li>
+            <li><a href="#tabs-update">Update</a></li>
+            <li><a href="#tabs-info">Info</a></li>
+        </ul>
+
+        <div id="tabs-home">
+            <fieldset>
+                <legend>BMS (HV battery) </legend>
+
+                <table align="center" border="0" cellpadding="5" width="80%">
+                    <tr><td>SoH</td><td id="bms_soh" align="right">-</td><td>%</td></tr>
+                    <tr><td>SoC</td><td id="bms_soc" align="right">-</td><td>%</td></tr>
+                    <tr><td>Temperature</td><td id="bms_temperature" align="right">-</td><td>&deg;C</td></tr>
+                    <tr><td>Voltage</td><td id="bms_voltage" align="right">-</td><td>Volt</td></tr>
+                    <tr><td>Current</td><td id="bms_current" align="right">-</td><td>Amp</td></tr>
+                    <tr><td>Power</td><td id="bms_power" align="right">-</td><td>kW</td></tr>
+                    <tr><td>Status</td><td id="bms_status" align="right">-</td><td>&nbsp;</td></tr>
+                </table>
+            </fieldset>
+            <fieldset>
+                <legend>VCU</legend>
+
+                <table align="center" border="0" cellpadding="5" width="80%">
+                    <tr><td>Odometer</td><td id="vcu_odometer" align="right">-</td><td>km</td></tr>
+                    <tr><td>Gear Position</td><td id="vcu_gear" align="right">-</td><td>&nbsp;</td></tr>
+                    <tr><td>Motor Coolant Temperature</td><td id="vcu_motor_coolant" align="right">-</td><td>&deg;C</td></tr>
+                    <tr><td>Motor Temperature</td><td id="vcu_motor_temperature" align="right">-</td><td>&deg;C</td></tr>
+                    <tr><td>DC-DC Temperature</td><td id="vcu_dc_dc_temperature" align="right">-</td><td>&deg;C</td></tr>
+                    <tr><td>DC-DC Output Voltage</td><td id="vcu_dc_dc_voltage" align="right">-</td><td>Volt</td></tr>
+                    <tr><td>DC-DC Output Current</td><td id="vcu_dc_dc_current" align="right">-</td><td>Amp</td></tr>
+                    <tr><td>DC-DC Output Power</td><td id="vcu_dc_dc_power" align="right">-</td><td>W</td></tr>
+                </table>
+            </fieldset>
+        </div>
+
+        <div id="tabs-can-monitor">
+            <fieldset>
+                <legend>CAN messages</legend>
+                <div id="can_messages_scroll" class="scroll">
+                    <pre id="can_messages"></pre>
+                </div>
+                <table border="0">
+                    <tr>
+                        <td>
+                            <button onClick="download('can-msg.txt', canMessageBuffer);">Download</button>
+                        </td>
+                        <td>
+                            <button onClick="canMessageBuffer='';$('#can_messages').text(canMessageBuffer);">Clear</button>
+                        </td>
+                        <td>
+                            <input type="checkbox" id="can_messages_auto_scroll" checked>
+                            <label for="can_messages_auto_scroll">Auto scroll</label>
+                        </td>
+                        <td>
+                            &nbsp;&nbsp;&nbsp;
+                        </td>
+                        <td>
+                            <button onClick="setPolling('off');">Disable auto polling</button>
+                        </td>
+                        <td>
+                            <button onClick="setPolling('on');">Enable auto polling</button>
+                        </td>
+                    </tr>   
+                </table>
+            </fieldset>
+            <fieldset>
+                <legend>Create a CAN message</legend>
+                <p>Sent out a custom CAN message. (All fields are in HEX.)</p>
+
+                <input type="text" name="can_message_to_send" id="can_message_to_send" placeholder="ID FLAGS DLC [D0] [D1] [D2] ..." size="40">
+                <button onClick="sendCAN();">Send</button>
+
+                <pre>
+IDENTIFIER FLAGS DLC [D0] [D1] [D2] [D3] [D4] [D5] [D6] [D7]
+
+IDENTIFIER - 11 or 29 bit identifier (Don't forget to set EXT flag for 29 bit identifier)
+        FLAGS - 1 EXT - Message is in Extended Frame Format (29 bit ID)
+                2 RTR - Message is a Remote Transmit Request
+        DLC - Data length code (0-8)
+
+Example:
+
+7df 0 8 03 22 b0 61 aa aa aa aa
+                </pre>
+                    
+            </fieldset>
+            <fieldset>
+                <legend>CAN2UDP</legend>
+                <p>Send out received CAN messages to IP:POPT. (Hex/UDP)</p>
+                <ul style="list-style-type:none;">
+                    <li>
+                        <input type="checkbox" name="can2udp_enable" id="can2udp_enable">
+                        <label for="can2udp_enable">Enable</label>
+                    </li>
+                    <li>
+                        <input type="text" name="can2udp_ip" id="can2udp_ip" placeholder="IP">
+                        <label for="can2udp_ip">Target IP</label>
+                    </li>
+                    <li>
+                        <input type="number" name="can2udp_port" id="can2udp_port" placeholder="PORT">
+                        <label for="can2udp_ip">Target port</label>
+                    </li>
+                    <li>&nbsp;</li>
+                    <li>
+                        <button onClick="save_can2udp();">Apply</button>
+                    </li>
+                  </ul>
+                </fieldset>
+          </div>
+
+        <div id="tabs-wifi">
+            <fieldset>
+              <legend>Station Mode</legend>
+              <p>Connect to an upstream access point. This made EP-OBD2-ESP32-U8G2 accessible from any device from your network. Don't use this in public network.</p>
+              <ul style="list-style-type:none;">
+                <li>
+                    <input type="checkbox" name="sta_mode_en" id="sta_mode_en">
+                    <label for="sta_mode_en">Enable</label>
+                </li>
+                <li>
+                    <input type="text" name="sta_ap_ssid" id="sta_ap_ssid" class="sta_mode">
+                    <label for="sta_ssid">SSID of the upstream access point.</label>
+                </li>
+                <li>
+                    <input type="password" name="sta_ap_pass" id="sta_ap_pass" class="sta_mode">
+                    <label for="sta_ssid">Password of the upstream access point.</label>
+                </li>
+              </ul>
+            </fieldset>
+
+            <fieldset>
+                <legend>Access Point Mode</legend>
+                <p>Become an access point, you can use your computers or mobile devices to connect to EP-OBD2-ESP32-U8G2.</p>
+                <ul style="list-style-type:none;">
+                    <li>
+                        <input type="checkbox" name="ap_mode_en" id="ap_mode_en">
+                        <label for="ap_mode_en">Enable</label>
+                    </li>
+                    <li>
+                        <input type="text" name="soft_ap_ssid" id="soft_ap_ssid" class="ap_mode">
+                        <label for="soft_ap_ssid">SSID</label>
+                    </li>
+                    <li>
+                        <input type="password" name="soft_ap_pass" id="soft_ap_pass" class="ap_mode">
+                        <label for="soft_ap_ssid">Password</label>
+                    </li>
+                  </ul>    
+            </fieldset>
+            
+            <p>
+                <button onClick="saveWiFi();">Apply & Restart</button>
+            </p>
+        </div>
+        <div id="tabs-lcd">
+            <p style="display: inline-block;">LCD Brightness</p> <div id="brightness_value" style="display: inline-block;">55</div>
+            <div id="lcd_brightness" style="width:260px; margin:15px;"></div>
+            <p style="display: inline-block;">LCD Contrast</p> <div id="contrast_value" style="display: inline-block;">55</div>
+            <div id="lcd_contrast" style="width:260px; margin:15px;"></div>
+            <script>
+                $( function() {
+                    $( "#lcd_brightness" ).slider({
+                        value: 128,
+                        min:0,
+                        max:255,
+                        orientation: "horizontal",
+                        animate: true,
+                    });
+        
+                    var start_brightness = $("#lcd_brightness").slider("value");
+                    var end_brightness='';
+        
+                    $("#lcd_brightness").on("slidestop", function(event, ui) {
+                        end_brightness = ui.value;
+        
+                        $('#brightness_value').text(ui.value);
+                        if (start_brightness != end_brightness) {
+                            lcdApply();
+                        }
+        
+                        start_brightness = end_brightness;
+                    });
+        
+                    $( "#lcd_contrast" ).slider({
+                        value: 65,
+                        min:0,
+                        max:255,
+                        orientation: "horizontal",
+                        animate: true,
+                    });
+        
+                    var start_contrast = $("#lcd_contrast").slider("value");
+                    var end_contrast='';
+        
+                    $("#lcd_contrast").on("slidestop", function(event, ui) {
+                        end_contrast = ui.value;
+        
+                        $('#contrast_value').text(ui.value);
+                        if (start_contrast != end_contrast) {
+                            lcdApply();
+                        }
+        
+                        start_contrast = end_contrast;
+                    });
+                } );
+            </script>        
+        </div>
+
+        <div id="tabs-update">
+            <fieldset>
+                <legend>Firmware Update</legend>
+                <p>EPOBD2ESP32U8G2.<b>ino.esp32</b>.bin</p>
+
+                <form method='POST' action='/firmware-update' enctype='multipart/form-data' id='firmware_upload_form'>
+                    <input type='file' name='update'>
+                    <input type='submit' value='Update'>
+                </form>
+
+                <div id='firmware_prg'>progress: 0%</div>
+
+                <script>
+                $('#firmware_upload_form').submit(function(e) {
+                    e.preventDefault();
+                    
+                    var form = $('#firmware_upload_form')[0];
+                    var data = new FormData(form);
+                    
+                    $.ajax({
+                        url: '/firmware-update',
+                        type: 'POST',
+                        data: data,
+                        contentType: false,
+                        processData: false,
+                        xhr: function() {
+                            var xhr = new window.XMLHttpRequest();
+                            xhr.upload.addEventListener('progress', function(evt) {
+                            if (evt.lengthComputable) {
+                                var per = evt.loaded / evt.total;
+                                $('#firmware_prg').html('progress: ' + Math.round(per*100) + '%');
+                            }
+                            }, false);
+                            
+                            return xhr;
+                        },
+                        success:function(d, s) {
+                            console.log('success!')
+                        },
+                        error: function (a, b, c) {
+                        }
+                    });
+                });
+                </script>
+            </fieldset>
+            <fieldset>
+                <legend>Web Update</legend>
+                <p>EPOBD2ESP32U8G2.<b>spiffs</b>.bin</p>
+
+                <form method='POST' action='/web-update' enctype='multipart/form-data' id='web_upload_form'>
+                    <input type='file' name='update'>
+                    <input type='submit' value='Update'>
+                </form>
+
+                <div id='web_prg'>progress: 0%</div>
+
+                <script>
+                $('#web_upload_form').submit(function(e) {
+                    e.preventDefault();
+                    
+                    var form = $('#web_upload_form')[0];
+                    var data = new FormData(form);
+                    
+                    $.ajax({
+                    url: '/web-update',
+                    type: 'POST',
+                    data: data,
+                    contentType: false,
+                    processData: false,
+                    xhr: function() {
+                        var xhr = new window.XMLHttpRequest();
+                        xhr.upload.addEventListener('progress', function(evt) {
+                        if (evt.lengthComputable) {
+                            var per = evt.loaded / evt.total;
+                            $('#web_prg').html('progress: ' + Math.round(per*100) + '%');
+                        }
+                        }, false);
+                        
+                        return xhr;
+                        },
+                        success:function(d, s) {
+                        console.log('success!')
+                        },
+                        error: function (a, b, c) {
+                    }
+                    });
+                });
+                </script>
+            </fieldset>
+        </div>
+
+        <div id="tabs-info">
+            <iframe src="/about" title="about" height="500" width="100%"></iframe>
+        </div>
+    </div>
+</body>
+</html>

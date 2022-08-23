@@ -1,0 +1,82 @@
+#define USE_LCD
+#define USE_WEB_INTERFACE
+#ifdef USE_WEB_INTERFACE
+# define USE_OTA_WEB_UPDATER
+#endif
+
+
+#define ESP32_LITE
+//#define ESP32_DEV_KIT_V1
+
+
+#ifdef ESP32_LITE
+# define LED_PIN GPIO_NUM_22
+# define LED_INVERT 1
+#elif defined ESP32_DEV_KIT_V1
+# define LED_PIN GPIO_NUM_2
+# define LED_INVERT 0
+#else
+# error Choose ESP32_LITE or ESP32_DEV_KIT_V1
+#endif
+
+#define PUSH_BUTTON_PIN GPIO_NUM_0
+
+#define CAN_TX GPIO_NUM_17
+#define CAN_RX GPIO_NUM_16
+
+#define LOCAL_UDP_PORT 2345
+#define WEB_SERVER_PORT 80
+
+#define OUR_NAME "EP-OBD2"
+
+#define DEFAULT_STA_MODE_EN false
+#define DEFAULT_AP_MODE_EN true
+
+#define DEFAULT_SOFT_AP_SSID OUR_NAME
+#define DEFAULT_SOFT_AP_PASS "EV for Everyone"
+
+#define DEFAULT_STA_AP_SSID "HOME-SSID-HERE"
+#define DEFAULT_STA_AP_PASS "HOME-PASSWORD-HERE"
+
+#define BUTTON_SHORT_PRESS_MILLI  50
+#define BUTTON_LONG_PRESS_MILLI   500
+#define BUTTON_RESET_WARNING 3000
+#define BUTTON_RESET_CONFIRM 6000
+
+#define WIFI_AUTO_RECONNECT_INTERVAL_MS 30000
+
+#define OBD2_POLLING_DELAY_MS 300
+#define GWM_AUTH_TIMEOUT 3000
+#define TESTERPRESENT_DELAY_MS 1000
+
+#define BMS_ID 0x7e5
+#define VCU_ID 0x7e3
+#define BCM_ID 0x740
+#define GWM_ID 0x710
+
+#define CAN_SEND_BUFFER_SIZE 10
+
+#ifdef USE_LCD
+#   define DEFAULT_LCD_CONTRAST 65
+#   define DEFAULT_LCD_BRIGHTNESS 64
+
+#   define LCD_BL_FREQUENCY 5000
+#   define LCD_BL_CHANNEL 0
+#   define LCD_BL_RESOLUTION 8
+#   define LCD_BL_PIN 4
+
+// ESP32 VSPI
+#   define LCD_CLK GPIO_NUM_18
+// Actually, the LCD doesn't have MISO
+#   define LCD_MISO GPIO_NUM_19
+#   define LCD_MOSI GPIO_NUM_23
+#   define LCD_CS GPIO_NUM_5
+
+#   ifdef ESP32_LITE
+#     define LCD_DC GPIO_NUM_2
+#   elif defined ESP32_DEV_KIT_V1
+#     define LCD_DC GPIO_NUM_22
+#   endif
+
+#   define LCD_RESET GPIO_NUM_15
+#endif
