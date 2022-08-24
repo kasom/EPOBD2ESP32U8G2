@@ -23,6 +23,8 @@
 
 #define CAN_TX GPIO_NUM_17
 #define CAN_RX GPIO_NUM_16
+//#define CAN_TX GPIO_NUM_23
+//#define CAN_RX GPIO_NUM_18
 
 #define LOCAL_UDP_PORT 2345
 #define WEB_SERVER_PORT 80

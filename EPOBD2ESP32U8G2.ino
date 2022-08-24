@@ -1,6 +1,8 @@
 const char info_text[] PROGMEM = R"rawliteral(
 /*
   EP-OBD2-ESP32-U8G2
+
+  Version 1
   
   A standalone tool to automatically turn the DRLs off when parked.
   Can retrieves some interesting information such as battery SoC/SoH 
